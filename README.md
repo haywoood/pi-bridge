@@ -1,5 +1,7 @@
 # pi-bridge
 
+![pi-bridge](img.png)
+
 Use the [pi coding agent](https://github.com/earendil-works/pi) from inside
 Emacs. One `pi --mode rpc` process per project, a chat buffer showing the
 session, and prompts that carry your current file, cursor, and region. pi

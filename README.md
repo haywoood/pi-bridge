@@ -79,8 +79,28 @@ Prompts go to a pi process started in the project root, so skills,
 extensions, and context files load normally. `pi-bridge` opens the chat
 buffer; there `RET`/`c` composes, `s` quick-sends, `a` aborts.
 
+## Staging context for a terminal pi
+
+If you prefer chatting with pi's own TUI (in a tmux pane, say), Emacs can
+act as the context stager instead of the chat window. Install the second
+extension:
+
+```sh
+ln -s ~/code/pi-bridge/emacs-stage.ts ~/.pi/agent/extensions/
+```
+
+Then in Emacs, `pi-bridge-stage-dwim` stages the region (or, with no
+region, the current file as a read-this reference). Items accumulate in
+`.pi/emacs-stage.md` — worth adding to the project's `.gitignore`. The pi
+TUI shows a widget above its editor while anything is staged, and your next
+message gets the staged context prepended automatically (this also applies
+to messages sent through the bridge). `/stage-clear` in pi, or
+`pi-bridge-stage-clear` in Emacs, discards it; `pi-bridge-stage-show`
+opens it. One-shot `pi -p` runs never consume staged context.
+
 Notes:
 
+- `pi-bridge-clear` empties the chat buffer (the session is untouched).
 - Sessions persist: each project reuses a stable pi session (see
   `pi-bridge-session-id`), so the conversation survives Emacs restarts, and
   the chat buffer replays recent history on reattach. Set it to nil for a

@@ -31,6 +31,8 @@
 ;;            :desc "compose prompt"    "c" #'pi-bridge-compose
 ;;            :desc "send to pi"        "s" #'pi-bridge-send
 ;;            :desc "send region to pi" "r" #'pi-bridge-send-region
+;;            :desc "stage region/file" "m" #'pi-bridge-stage-dwim
+;;            :desc "clear staged"      "M" #'pi-bridge-stage-clear
 ;;            :desc "abort pi"          "a" #'pi-bridge-abort
 ;;            :desc "kill pi session"   "k" #'pi-bridge-kill)))
 ;;   (after! emacs (unless (bound-and-true-p server-process) (server-start)))
@@ -636,6 +638,71 @@ the header line (C-c C-t toggles it off).  C-c C-c sends, C-c C-k cancels."
   (interactive)
   (quit-window))
 
+;;; Context staging (for chatting with pi in a terminal TUI)
+
+(defun pi-bridge--stage-file (root)
+  (expand-file-name ".pi/emacs-stage.md" root))
+
+;;;###autoload
+(defun pi-bridge-stage-dwim ()
+  "Stage the region (or, with none active, the current file) as context.
+Staged items accumulate in .pi/emacs-stage.md and are attached to the next
+message you send to pi — in a terminal `pi' TUI (via the emacs-stage
+extension) or through this bridge.  Stage several, then go type your
+message."
+  (interactive)
+  (let* ((root (pi-bridge--root))
+         (stage (pi-bridge--stage-file root))
+         (rel (and buffer-file-name (file-relative-name buffer-file-name root)))
+         (region (use-region-p))
+         (entry (cond
+                 (region
+                  (format "From %s lines %d-%d:\n```\n%s\n```\n\n"
+                          (or rel (buffer-name))
+                          (line-number-at-pos (region-beginning))
+                          (line-number-at-pos (region-end))
+                          (buffer-substring-no-properties
+                           (region-beginning) (region-end))))
+                 (rel (format "Read %s for context.\n\n" rel))
+                 (t (user-error "Nothing to stage (no file, no region)")))))
+    (make-directory (file-name-directory stage) t)
+    (unless (file-exists-p stage)
+      (write-region "[staged context from emacs]\n\n" nil stage nil 'silent))
+    (write-region entry nil stage 'append 'silent)
+    (deactivate-mark)
+    (message "pi: staged %s"
+             (if region
+                 (format "%s:%d-%d" (or rel (buffer-name))
+                         (line-number-at-pos (region-beginning))
+                         (line-number-at-pos (region-end)))
+               rel))))
+
+;;;###autoload
+(defun pi-bridge-stage-clear ()
+  "Discard all staged context for this project."
+  (interactive)
+  (let ((stage (pi-bridge--stage-file (pi-bridge--root))))
+    (if (file-exists-p stage)
+        (progn (delete-file stage) (message "pi: staged context cleared"))
+      (message "pi: nothing staged"))))
+
+;;;###autoload
+(defun pi-bridge-stage-show ()
+  "Visit the staged-context file for this project."
+  (interactive)
+  (let ((stage (pi-bridge--stage-file (pi-bridge--root))))
+    (unless (file-exists-p stage) (user-error "Nothing staged"))
+    (find-file-other-window stage)))
+
+;;;###autoload
+(defun pi-bridge-clear ()
+  "Clear the chat buffer.  The pi session itself is untouched."
+  (interactive)
+  (unless (derived-mode-p 'pi-bridge-mode)
+    (user-error "Not in a pi chat buffer"))
+  (let ((inhibit-read-only t))
+    (erase-buffer)))
+
 ;;;###autoload
 (defun pi-bridge-abort ()
   "Abort the current pi run for this project."
@@ -669,6 +736,7 @@ the header line (C-c C-t toggles it off).  C-c C-c sends, C-c C-k cancels."
 (define-key pi-bridge-mode-map (kbd "s") #'pi-bridge-send)
 (define-key pi-bridge-mode-map (kbd "c") #'pi-bridge-compose)
 (define-key pi-bridge-mode-map (kbd "RET") #'pi-bridge-compose)
+(define-key pi-bridge-mode-map (kbd "C") #'pi-bridge-clear)
 (define-key pi-bridge-mode-map (kbd "a") #'pi-bridge-abort)
 
 (provide 'pi-bridge)

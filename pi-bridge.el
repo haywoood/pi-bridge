@@ -28,6 +28,7 @@
 ;;     (map! :leader
 ;;           (:prefix ("j" . "pi")
 ;;            :desc "pi chat buffer"    "j" #'pi-bridge
+;;            :desc "compose prompt"    "c" #'pi-bridge-compose
 ;;            :desc "send to pi"        "s" #'pi-bridge-send
 ;;            :desc "send region to pi" "r" #'pi-bridge-send-region
 ;;            :desc "abort pi"          "a" #'pi-bridge-abort
@@ -50,6 +51,16 @@
 (defcustom pi-bridge-extra-args nil
   "Extra CLI args appended to `pi-bridge-command' (e.g. (\"--model\" \"...\"))."
   :type '(repeat string))
+
+(defcustom pi-bridge-session-id "pi-bridge"
+  "Stable per-project pi session id, so conversations survive Emacs restarts.
+pi scopes session ids to the project directory, so every project gets its
+own \"pi-bridge\" session.  Set to nil to start a fresh session each time."
+  :type '(choice string (const nil)))
+
+(defcustom pi-bridge-history-limit 30
+  "How many prior messages to replay in the chat buffer when resuming."
+  :type 'integer)
 
 (defcustom pi-bridge-show-thinking nil
   "When non-nil, stream the model's thinking into the chat buffer (dimmed)."
@@ -111,7 +122,10 @@
          (stderr-buf (get-buffer-create (format " *pi-stderr: %s*" root)))
          (proc (make-process
                 :name (format "pi-bridge[%s]" root)
-                :command (append pi-bridge-command pi-bridge-extra-args)
+                :command (append pi-bridge-command
+                                 (when pi-bridge-session-id
+                                   (list "--session-id" pi-bridge-session-id))
+                                 pi-bridge-extra-args)
                 :connection-type 'pipe
                 :noquery t
                 :filter #'pi-bridge--filter
@@ -242,7 +256,7 @@
       ("extension_ui_request" (pi-bridge--handle-ui proc buf ev))
       (_ nil))))
 
-(defun pi-bridge--handle-response (_proc buf ev)
+(defun pi-bridge--handle-response (proc buf ev)
   (let ((cmd (plist-get ev :command)))
     (cond
      ((not (plist-get ev :success))
@@ -250,11 +264,61 @@
       (pi-bridge--insert buf (format "✗ %s: %s\n" cmd (plist-get ev :error))
                          'pi-bridge-error-face))
      ((equal cmd "get_state")
-      (let ((data (plist-get ev :data)))
+      (let* ((data (plist-get ev :data))
+             (n (or (plist-get data :messageCount) 0)))
         (with-current-buffer buf
           (setq pi-bridge--model (plist-get (plist-get data :model) :id)
                 pi-bridge--session (plist-get data :sessionId)))
-        (force-mode-line-update t))))))
+        (force-mode-line-update t)
+        ;; resumed a session with prior messages: replay them once
+        (when (and (> n 0) (not (process-get proc 'pi-history-done)))
+          (process-put proc 'pi-history-done t)
+          (pi-bridge--send-json proc '(:type "get_messages")))))
+     ((equal cmd "get_messages")
+      (pi-bridge--render-history
+       buf (plist-get (plist-get ev :data) :messages))))))
+
+(defun pi-bridge--content-text (content)
+  "Concatenated text blocks of a message CONTENT (string or block vector)."
+  (cond
+   ((stringp content) content)
+   ((vectorp content)
+    (mapconcat (lambda (b)
+                 (when (equal (plist-get b :type) "text") (plist-get b :text)))
+               content ""))
+   (t "")))
+
+(defun pi-bridge--display-prompt (s)
+  "First line of user prompt S, with any [context] preamble stripped."
+  (let ((s (or s "")))
+    (when (string-prefix-p "[context]" s)
+      (when-let ((i (string-search "\n\n" s)))
+        (setq s (substring s (+ i 2)))))
+    (pi-bridge--truncate (pi-bridge--first-line s) 160)))
+
+(defun pi-bridge--render-history (buf messages)
+  "Replay the tail of a resumed session's MESSAGES into chat BUF."
+  (let* ((msgs (seq-filter
+                (lambda (m) (member (plist-get m :role) '("user" "assistant")))
+                (append messages nil)))
+         (dropped (max 0 (- (length msgs) pi-bridge-history-limit)))
+         (tail (seq-drop msgs dropped)))
+    (when tail
+      (when (> dropped 0)
+        (pi-bridge--insert buf (format "… %d earlier messages not shown\n" dropped)
+                           'pi-bridge-dim-face))
+      (dolist (m tail)
+        (pcase (plist-get m :role)
+          ("user"
+           (pi-bridge--insert
+            buf (format "\n❯ %s\n" (pi-bridge--display-prompt
+                                    (pi-bridge--content-text (plist-get m :content))))
+            'pi-bridge-prompt-face))
+          ("assistant"
+           (let ((text (string-trim (pi-bridge--content-text (plist-get m :content)))))
+             (unless (string-empty-p text)
+               (pi-bridge--insert buf (concat (pi-bridge--truncate text 4000) "\n")))))))
+      (pi-bridge--insert buf "── resumed ──\n" 'pi-bridge-dim-face))))
 
 (defun pi-bridge--handle-delta (buf d)
   (pcase (plist-get d :type)
@@ -455,22 +519,27 @@ Returns (MESSAGE-PART . ECHO-NOTE), or nil when not visiting a file."
 
 ;;;###autoload
 (defun pi-bridge-send ()
-  "Send a prompt to the project's pi session.
+  "Send a quick one-line prompt to the project's pi session.
 From a file buffer, the prompt carries file/cursor context (and the region,
-when active).  From the chat buffer, it is sent bare."
+when active).  From the chat buffer, it is sent bare.  An empty prompt
+opens the multi-line compose buffer instead (see `pi-bridge-compose')."
   (interactive)
   (let* ((ctx (unless (derived-mode-p 'pi-bridge-mode) (pi-bridge--context-block)))
          (root (pi-bridge--root))
-         (instruction (read-string "pi ❯ ")))
-    (when (string-empty-p (string-trim instruction))
-      (user-error "Empty prompt"))
-    (pi-bridge--dispatch root
-                         (concat (car ctx) instruction)
-                         instruction (cdr ctx))))
+         (instruction (read-string "pi ❯ (empty = compose) ")))
+    (if (string-empty-p (string-trim instruction))
+        (pi-bridge-compose)
+      (pi-bridge--dispatch root
+                           (concat (car ctx) instruction)
+                           instruction (cdr ctx)))))
 
 ;;;###autoload
 (defun pi-bridge-send-region (beg end)
-  "Send the active region plus an instruction to the project's pi session."
+  "Send the active region to the project's pi session.
+Prompts for an instruction; when one is given, the region is sent as fenced
+context beneath it.  When left empty, the region text itself IS the prompt
+\(so you can write a prompt in the buffer — e.g. as a comment — select it,
+and send it directly)."
   (interactive "r")
   (unless (use-region-p) (user-error "No active region"))
   (let* ((root (pi-bridge--root))
@@ -480,14 +549,84 @@ when active).  From the chat buffer, it is sent bare."
          (l1 (line-number-at-pos beg))
          (l2 (line-number-at-pos end))
          (text (buffer-substring-no-properties beg end))
-         (instruction (read-string (format "pi ❯ [%s:%d-%d] " rel l1 l2))))
-    (when (string-empty-p (string-trim instruction))
-      (user-error "Empty prompt"))
-    (pi-bridge--dispatch
-     root
-     (format "[context] I am in %s, looking at lines %d-%d:\n```\n%s\n```\n\n%s"
-             rel l1 l2 text instruction)
-     instruction (format "[%s:%d-%d]" rel l1 l2))))
+         (instruction (read-string
+                       (format "pi ❯ [%s:%d-%d] (empty = region is the prompt) "
+                               rel l1 l2))))
+    (if (string-empty-p (string-trim instruction))
+        (pi-bridge--dispatch root text
+                             (pi-bridge--truncate (pi-bridge--first-line text) 120)
+                             (format "[%s:%d-%d]" rel l1 l2))
+      (pi-bridge--dispatch
+       root
+       (format "[context] I am in %s, looking at lines %d-%d:\n```\n%s\n```\n\n%s"
+               rel l1 l2 text instruction)
+       instruction (format "[%s:%d-%d]" rel l1 l2)))))
+
+;;; Compose buffer (multi-line prompts)
+
+(defvar-local pi-bridge--compose-root nil)
+(defvar-local pi-bridge--compose-context nil)
+(defvar-local pi-bridge--compose-use-context t)
+
+(defun pi-bridge--compose-header ()
+  (concat "C-c C-c send · C-c C-k cancel"
+          (when pi-bridge--compose-context
+            (format " · C-c C-t context [%s]"
+                    (if pi-bridge--compose-use-context
+                        (cdr pi-bridge--compose-context)
+                      "off")))))
+
+(define-derived-mode pi-bridge-compose-mode text-mode "pi-compose"
+  "Compose a multi-line prompt for pi."
+  (setq header-line-format '(:eval (pi-bridge--compose-header)))
+  (visual-line-mode 1))
+
+(define-key pi-bridge-compose-mode-map (kbd "C-c C-c") #'pi-bridge-compose-send)
+(define-key pi-bridge-compose-mode-map (kbd "C-c C-k") #'pi-bridge-compose-cancel)
+(define-key pi-bridge-compose-mode-map (kbd "C-c C-t") #'pi-bridge-compose-toggle-context)
+
+;;;###autoload
+(defun pi-bridge-compose ()
+  "Open a multi-line compose buffer for the project's pi session.
+Invoked from a file buffer it captures file/cursor/region context, shown in
+the header line (C-c C-t toggles it off).  C-c C-c sends, C-c C-k cancels."
+  (interactive)
+  (let ((root (pi-bridge--root))
+        (ctx (unless (derived-mode-p 'pi-bridge-mode) (pi-bridge--context-block)))
+        (buf (get-buffer-create "*pi compose*")))
+    (with-current-buffer buf
+      (pi-bridge-compose-mode)
+      (setq pi-bridge--compose-root root
+            pi-bridge--compose-context ctx
+            pi-bridge--compose-use-context t))
+    (pop-to-buffer buf '((display-buffer-below-selected)
+                         (window-height . 8)))
+    (when (fboundp 'evil-insert-state) (evil-insert-state))))
+
+(defun pi-bridge-compose-toggle-context ()
+  "Toggle whether the captured file/region context is sent with the prompt."
+  (interactive)
+  (setq pi-bridge--compose-use-context (not pi-bridge--compose-use-context))
+  (force-mode-line-update))
+
+(defun pi-bridge-compose-send ()
+  "Send the compose buffer's content and close it."
+  (interactive)
+  (let ((text (string-trim (buffer-substring-no-properties (point-min) (point-max))))
+        (root pi-bridge--compose-root)
+        (ctx (and pi-bridge--compose-use-context pi-bridge--compose-context)))
+    (when (string-empty-p text) (user-error "Empty prompt"))
+    (erase-buffer)
+    (quit-window)
+    (pi-bridge--dispatch root
+                         (concat (car ctx) text)
+                         (pi-bridge--truncate (pi-bridge--first-line text) 120)
+                         (cdr ctx))))
+
+(defun pi-bridge-compose-cancel ()
+  "Close the compose buffer without sending (content is kept)."
+  (interactive)
+  (quit-window))
 
 ;;;###autoload
 (defun pi-bridge-abort ()
@@ -520,6 +659,8 @@ when active).  From the chat buffer, it is sent bare."
 (define-key pi-bridge-mode-map (kbd "C-c C-s") #'pi-bridge-send)
 (define-key pi-bridge-mode-map (kbd "C-c C-k") #'pi-bridge-abort)
 (define-key pi-bridge-mode-map (kbd "s") #'pi-bridge-send)
+(define-key pi-bridge-mode-map (kbd "c") #'pi-bridge-compose)
+(define-key pi-bridge-mode-map (kbd "RET") #'pi-bridge-compose)
 (define-key pi-bridge-mode-map (kbd "a") #'pi-bridge-abort)
 
 (provide 'pi-bridge)

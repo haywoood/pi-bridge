@@ -64,14 +64,27 @@ ln -s ~/code/pi-bridge/emacs-context.ts ~/.pi/agent/extensions/
 
 ## Use
 
-Open a file in a project and run `pi-bridge-send`. The prompt is sent to a
-pi process started in the project root (so skills, extensions, and context
-files load normally), along with which file and line you're on — and the
-region, if one is active. `pi-bridge` opens the chat buffer; `pi-bridge-send-region`
-sends the selected code fenced in the prompt.
+Open a file in a project and run one of:
+
+- `pi-bridge-compose` — a multi-line prompt buffer (the comfortable way to
+  chat). `C-c C-c` sends, `C-c C-k` cancels, `C-c C-t` toggles whether the
+  captured file/cursor/region context is attached.
+- `pi-bridge-send` — quick one-line prompt from the minibuffer; leaving it
+  empty opens compose instead.
+- `pi-bridge-send-region` — sends the region fenced beneath your
+  instruction; leaving the instruction empty sends the region text itself
+  as the prompt (write a prompt in the buffer, select it, send it).
+
+Prompts go to a pi process started in the project root, so skills,
+extensions, and context files load normally. `pi-bridge` opens the chat
+buffer; there `RET`/`c` composes, `s` quick-sends, `a` aborts.
 
 Notes:
 
+- Sessions persist: each project reuses a stable pi session (see
+  `pi-bridge-session-id`), so the conversation survives Emacs restarts, and
+  the chat buffer replays recent history on reattach. Set it to nil for a
+  fresh session each start.
 - Modified project buffers are saved before each send, and buffers are
   reverted as the agent's edits land, so buffers and disk stay in sync.
 - Edits are ordinary working-tree changes: review them with your usual git

@@ -1,6 +1,6 @@
 # pi-bridge
 
-Use the [pi coding agent](https://github.com/badlogic/pi-mono) from inside
+Use the [pi coding agent](https://github.com/earendil-works/pi) from inside
 Emacs. One `pi --mode rpc` process per project, a chat buffer showing the
 session, and prompts that carry your current file, cursor, and region. pi
 edits files on disk as usual; the bridge keeps your buffers in sync as the

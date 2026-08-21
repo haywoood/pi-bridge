@@ -109,17 +109,27 @@ own \"pi-bridge\" session.  Set to nil to start a fresh session each time."
 (defun pi-bridge--buffer-name (root)
   (format "*pi: %s*" (file-name-nondirectory (directory-file-name root))))
 
+(defun pi-bridge--attach-buffer (proc root)
+  "Create and wire a chat buffer for PROC; used at start and reattach."
+  (let ((buf (get-buffer-create (pi-bridge--buffer-name root))))
+    (process-put proc 'pi-chat buf)
+    (with-current-buffer buf
+      (unless (derived-mode-p 'pi-bridge-mode) (pi-bridge-mode))
+      (setq pi-bridge--root root
+            pi-bridge--proc proc
+            pi-bridge--busy nil))
+    buf))
+
 (defun pi-bridge--live-proc (root)
   (let ((proc (gethash root pi-bridge--procs)))
-    (cond
-     ((not (and proc (process-live-p proc))) nil)
-     ;; chat buffer was killed out from under a live process: drop the
-     ;; process so the caller starts a fresh, fully-wired one
-     ((not (buffer-live-p (process-get proc 'pi-chat)))
-      (delete-process proc)
-      (remhash root pi-bridge--procs)
-      nil)
-     (t proc))))
+    (when (and proc (process-live-p proc))
+      ;; chat buffer killed out from under the live process: reattach a
+      ;; fresh buffer and replay state/history from the running session
+      (unless (buffer-live-p (process-get proc 'pi-chat))
+        (pi-bridge--attach-buffer proc root)
+        (process-put proc 'pi-history-done nil)
+        (pi-bridge--send-json proc '(:type "get_state")))
+      proc)))
 
 (defun pi-bridge--proc (root &optional create)
   (or (pi-bridge--live-proc root)
@@ -144,11 +154,7 @@ own \"pi-bridge\" session.  Set to nil to start a fresh session each time."
     (process-put proc 'pi-chat buf)
     (process-put proc 'pi-root root)
     (process-put proc 'pi-acc "")
-    (with-current-buffer buf
-      (unless (derived-mode-p 'pi-bridge-mode) (pi-bridge-mode))
-      (setq pi-bridge--root root
-            pi-bridge--proc proc
-            pi-bridge--busy nil))
+    (pi-bridge--attach-buffer proc root)
     (puthash root proc pi-bridge--procs)
     (pi-bridge--insert buf (format "── pi started in %s ──\n" root)
                        'pi-bridge-dim-face)
@@ -158,7 +164,10 @@ own \"pi-bridge\" session.  Set to nil to start a fresh session each time."
 (defun pi-bridge--sentinel (proc event)
   (let ((buf (process-get proc 'pi-chat))
         (root (process-get proc 'pi-root)))
-    (when root (remhash root pi-bridge--procs))
+    ;; only drop the registry entry if it still points at THIS process — a
+    ;; replacement may already have been registered under the same root
+    (when (and root (eq (gethash root pi-bridge--procs) proc))
+      (remhash root pi-bridge--procs))
     (when (buffer-live-p buf)
       (with-current-buffer buf (setq pi-bridge--busy nil))
       (pi-bridge--insert buf (format "\n── pi process %s──\n" event)

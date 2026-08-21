@@ -109,7 +109,15 @@ own \"pi-bridge\" session.  Set to nil to start a fresh session each time."
 
 (defun pi-bridge--live-proc (root)
   (let ((proc (gethash root pi-bridge--procs)))
-    (and proc (process-live-p proc) proc)))
+    (cond
+     ((not (and proc (process-live-p proc))) nil)
+     ;; chat buffer was killed out from under a live process: drop the
+     ;; process so the caller starts a fresh, fully-wired one
+     ((not (buffer-live-p (process-get proc 'pi-chat)))
+      (delete-process proc)
+      (remhash root pi-bridge--procs)
+      nil)
+     (t proc))))
 
 (defun pi-bridge--proc (root &optional create)
   (or (pi-bridge--live-proc root)
